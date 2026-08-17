@@ -1,0 +1,9 @@
+torch
+transformers
+opencv-python-headless
+kornia
+pillow
+matplotlib
+scikit-image
+huggingface_hub
+numpy

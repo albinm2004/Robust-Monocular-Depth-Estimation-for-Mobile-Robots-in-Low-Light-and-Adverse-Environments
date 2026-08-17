@@ -68,10 +68,27 @@ class MockDepthModel:
         return _Pred(raw=noisy_disp.astype(np.float32), is_metric=False, inference_seconds=dt)
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
 def resolve_depth(pred, gt_depth_m: np.ndarray) -> np.ndarray:
-    from depth_infer import least_squares_disparity_alignment
+    """Empirically (see commit history / README), the HF 'Metric-Indoor' checkpoint's
+    raw output on this data source carries a consistent ~20-35% global scale bias
+    against ground truth (confirmed via per-image correlation ~0.93-0.95 but
+    mean-ratio consistently off) -- structure is right, absolute scale isn't. Rather
+    than trust the checkpoint's metric claim at face value, apply the same
+    median-scale calibration depth_infer.py already ships for exactly this case
+    (see its docstring: "a sanity check on a metric checkpoint"). This is a per-image
+    single multiplicative factor, so it does not erase corruption-severity error
+    trends -- only removes a constant scale offset."""
+    from depth_infer import least_squares_disparity_alignment, median_scale_alignment
     if pred.is_metric:
-        return pred.raw
+        return median_scale_alignment(pred.raw, gt_depth_m)
     return least_squares_disparity_alignment(pred.raw, gt_depth_m)
 
 
@@ -88,6 +105,24 @@ def load_samples(data_dir: str):
         yield name, rgb, depth
 
 
+def load_nyu_depth_v2(split: str = "validation", limit: int | None = None):
+    """Real NYU Depth V2 labeled test split (654 images), via the parquet-converted
+    mirror of sayakpaul/nyu_depth_v2 on the HF Hub -- `image` is RGB uint8, `depth_map`
+    is a float32 TIFF in metres (verified by direct inspection, not the .mat file, but
+    same underlying Silberman et al. labeled data / same 654-image count as the
+    official test split). Cached locally by `datasets` after the first call.
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("sayakpaul/nyu_depth_v2", split=split, revision="refs/convert/parquet")
+    n = len(ds) if limit is None else min(limit, len(ds))
+    for i in range(n):
+        row = ds[i]
+        rgb = np.asarray(row["image"].convert("RGB")).astype(np.float32) / 255.0
+        depth = np.asarray(row["depth_map"]).astype(np.float32)
+        yield f"nyu_{i:04d}", rgb, depth
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -99,33 +134,58 @@ ENHANCEMENTS = ["none", "clahe", "zero_dce"]
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="data/samples")
+    ap.add_argument("--data-source", default="synthetic", choices=["synthetic", "nyu"],
+                     help="synthetic: *_rgb.png/*_depth.npy pairs under --data-dir "
+                          "(wiring tests only). nyu: real NYU Depth V2 labeled test "
+                          "split (654 images), downloaded/cached via the HF `datasets` "
+                          "hub -- --data-dir is ignored in this mode.")
+    ap.add_argument("--limit", type=int, default=None,
+                     help="Cap the number of samples (e.g. for a cheap subset run "
+                          "before scaling up to the full set).")
     ap.add_argument("--out-csv", default="data/results/eval_results.csv")
     ap.add_argument("--model-size", default="small", choices=["small", "base", "large"])
     ap.add_argument("--real-model", action="store_true",
                      help="Use the real Depth Anything V2 model (needs internet access "
                           "to huggingface.co -- not available in this sandbox).")
+    ap.add_argument("--zero-dce-weights", default=None,
+                     help="Path to trained Zero-DCE weights (see scripts/train_zero_dce.py). "
+                          "If omitted, the zero_dce arm uses an untrained (random-init) net.")
+    ap.add_argument("--skip-benchmark", action="store_true",
+                     help="Skip the per-row timing pass (benchmark_callable). Use this for "
+                          "real-model runs to avoid ~4x extra forward passes; run "
+                          "src/benchmark.py separately for dedicated latency numbers.")
     args = ap.parse_args()
 
     if args.real_model:
         from depth_infer import DepthAnythingV2Model
-        model = DepthAnythingV2Model(size=args.model_size, metric=True)
+        device = "cuda" if _cuda_available() else "cpu"
+        model = DepthAnythingV2Model(size=args.model_size, metric=True, device=device)
         model.load()
-        print(f"Loaded real model: {model.model_id}")
+        print(f"Loaded real model: {model.model_id} (device={device})")
     else:
         model = MockDepthModel()
         print("Using MockDepthModel (pass --real-model on a machine with internet "
               "access to run the actual Depth Anything V2 checkpoint).")
 
     zero_dce_net = ZeroDCENet()  # untrained by default; see scripts/train_zero_dce.py
+    if args.zero_dce_weights:
+        zero_dce_net.load_weights(args.zero_dce_weights)
+        print(f"Loaded trained Zero-DCE weights: {args.zero_dce_weights}")
 
     rows = []
     benchmarks = []
 
-    samples = list(load_samples(args.data_dir))
+    if args.data_source == "nyu":
+        samples = list(load_nyu_depth_v2(limit=args.limit))
+    else:
+        samples = list(load_samples(args.data_dir))
+        if args.limit:
+            samples = samples[: args.limit]
     if not samples:
         print(f"No samples found in {args.data_dir}. Run scripts/make_sample_data.py "
               f"first, or point --data-dir at your real dataset.")
         return
+    print(f"Loaded {len(samples)} samples from data-source={args.data_source}")
 
     for name, rgb, depth in samples:
         for corruption_name in list(CORRUPTIONS) + ["clean"]:
@@ -166,13 +226,14 @@ def main():
                     }
                     rows.append(row)
 
-                    bench = benchmark_callable(
-                        lambda: model.predict(processed, depth) if not args.real_model else model.predict(pil_img),
-                        label=f"{corruption_name}_sev{severity}_{enh}",
-                        device="cpu" if not args.real_model else "unknown",
-                        n_warmup=1, n_runs=3,
-                    )
-                    benchmarks.append(bench)
+                    if not args.skip_benchmark:
+                        bench = benchmark_callable(
+                            lambda: model.predict(processed, depth) if not args.real_model else model.predict(pil_img),
+                            label=f"{corruption_name}_sev{severity}_{enh}",
+                            device="cpu" if not args.real_model else "unknown",
+                            n_warmup=1, n_runs=3,
+                        )
+                        benchmarks.append(bench)
 
     os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
     with open(args.out_csv, "w", newline="") as f:

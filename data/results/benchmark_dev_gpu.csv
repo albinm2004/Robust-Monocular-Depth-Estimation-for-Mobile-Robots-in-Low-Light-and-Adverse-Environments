@@ -1,0 +1,4 @@
+label,device,hostname,n_warmup,n_runs,mean_latency_s,std_latency_s,p50_latency_s,p95_latency_s,fps
+depth-anything-v2-metric-indoor-small,dev-gpu:NVIDIA GeForce RTX 4060 Laptop GPU,Amathew,5,30,0.08513046666703303,0.07856085650934004,0.052290800000264426,0.28006875499977446,11.746675886451499
+depth-anything-v2-metric-indoor-base,dev-gpu:NVIDIA GeForce RTX 4060 Laptop GPU,Amathew,5,30,0.1528655000000678,0.08142386470197625,0.1073386499992921,0.3305797199998778,6.541698421158185
+depth-anything-v2-metric-indoor-large,dev-gpu:NVIDIA GeForce RTX 4060 Laptop GPU,Amathew,5,30,0.36516720333323366,0.09734289817109149,0.3435695999978634,0.564170500002001,2.7384715573360214

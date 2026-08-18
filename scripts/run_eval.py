@@ -24,6 +24,18 @@ import os
 import sys
 import time
 
+# Cap thread pools before numpy/cv2/torch spin them up -- each library defaults to
+# one pool per available core, and with ~25k sequential single-image forward passes
+# that oversubscription (confirmed: ~24 cores' worth of CPU time per 5s wall time on
+# a run that never got past the first print statement) dominates wall-clock time far
+# more than the actual GPU compute does.
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+
+import cv2
+cv2.setNumThreads(4)
+
 import numpy as np
 from PIL import Image
 
@@ -185,9 +197,15 @@ def main():
         print(f"No samples found in {args.data_dir}. Run scripts/make_sample_data.py "
               f"first, or point --data-dir at your real dataset.")
         return
-    print(f"Loaded {len(samples)} samples from data-source={args.data_source}")
+    print(f"Loaded {len(samples)} samples from data-source={args.data_source}", flush=True)
 
-    for name, rgb, depth in samples:
+    os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
+    csv_writer = None
+    csv_file = open(args.out_csv, "w", newline="")
+    n_rows_written = 0
+    t_start = time.perf_counter()
+
+    for sample_idx, (name, rgb, depth) in enumerate(samples):
         for corruption_name in list(CORRUPTIONS) + ["clean"]:
             for severity in (SEVERITIES if corruption_name != "clean" else [0]):
                 if corruption_name == "clean":
@@ -226,6 +244,12 @@ def main():
                     }
                     rows.append(row)
 
+                    if csv_writer is None:
+                        csv_writer = csv.DictWriter(csv_file, fieldnames=list(row.keys()))
+                        csv_writer.writeheader()
+                    csv_writer.writerow(row)
+                    n_rows_written += 1
+
                     if not args.skip_benchmark:
                         bench = benchmark_callable(
                             lambda: model.predict(processed, depth) if not args.real_model else model.predict(pil_img),
@@ -235,11 +259,15 @@ def main():
                         )
                         benchmarks.append(bench)
 
-    os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
-    with open(args.out_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+        csv_file.flush()
+        elapsed = time.perf_counter() - t_start
+        rate = elapsed / (sample_idx + 1)
+        remaining = rate * (len(samples) - sample_idx - 1)
+        print(f"[{sample_idx + 1}/{len(samples)}] {name} done -- "
+              f"{n_rows_written} rows so far, {elapsed:.0f}s elapsed, "
+              f"~{remaining:.0f}s remaining", flush=True)
+
+    csv_file.close()
 
     bench_csv = args.out_csv.replace(".csv", "_benchmark.csv")
     write_csv(benchmarks, bench_csv)

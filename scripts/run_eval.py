@@ -162,11 +162,20 @@ def main():
     ap.add_argument("--zero-dce-weights", default=None,
                      help="Path to trained Zero-DCE weights (see scripts/train_zero_dce.py). "
                           "If omitted, the zero_dce arm uses an untrained (random-init) net.")
+    ap.add_argument("--enhancements", default=",".join(ENHANCEMENTS),
+                     help="Comma-separated subset of {none,clahe,zero_dce} to run -- e.g. "
+                          "'zero_dce' alone to cheaply re-run just that arm (with "
+                          "--zero-dce-weights) without recomputing the untouched arms.")
     ap.add_argument("--skip-benchmark", action="store_true",
                      help="Skip the per-row timing pass (benchmark_callable). Use this for "
                           "real-model runs to avoid ~4x extra forward passes; run "
                           "src/benchmark.py separately for dedicated latency numbers.")
     args = ap.parse_args()
+
+    enhancements = [e.strip() for e in args.enhancements.split(",") if e.strip()]
+    unknown = set(enhancements) - set(ENHANCEMENTS)
+    if unknown:
+        raise ValueError(f"Unknown --enhancements value(s) {unknown}; choices are {ENHANCEMENTS}")
 
     if args.real_model:
         from depth_infer import DepthAnythingV2Model
@@ -215,7 +224,7 @@ def main():
                 else:
                     corrupted = apply_corruption(corruption_name, rgb, severity=severity)
 
-                for enh in ENHANCEMENTS:
+                for enh in enhancements:
                     if enh == "none":
                         processed = corrupted
                     elif enh == "clahe":

@@ -4,9 +4,9 @@ Generate the side-by-side qualitative comparison figure needed for the paper
 maps side-by-side"). Row = clean / corrupted / enhanced; columns = RGB input
 and predicted depth map, plus ground truth for reference.
 
-This uses MockDepthModel by default so it runs anywhere (including this
-sandbox); pass --real-model on your GPU workstation / Jetson once you have
-network access to actually load Depth Anything V2.
+Uses MockDepthModel by default so it runs anywhere without network/GPU access;
+pass --real-model (needs the same huggingface.co access as run_eval.py) to use
+the actual Depth Anything V2 checkpoint instead.
 """
 
 from __future__ import annotations
@@ -23,34 +23,75 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from corruptions import apply_corruption          # noqa: E402
-from enhance import clahe_enhance                  # noqa: E402
-from run_eval import MockDepthModel, resolve_depth  # noqa: E402
+from corruptions import apply_corruption                       # noqa: E402
+from enhance import clahe_enhance, ZeroDCENet, zero_dce_enhance  # noqa: E402
+from run_eval import MockDepthModel, resolve_depth, load_nyu_depth_v2  # noqa: E402
+
+
+def _load_sample(args):
+    if args.data_source == "nyu":
+        gen = load_nyu_depth_v2(limit=args.nyu_index + 1)
+        *_, (name, rgb, depth) = gen
+        return rgb, depth
+    rgb = np.asarray(Image.open(f"{args.sample}_rgb.png")).astype(np.float32) / 255.0
+    depth = np.load(f"{args.sample}_depth.npy")
+    return rgb, depth
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sample", default="data/samples/synthetic_00")
+    ap.add_argument("--data-source", default="synthetic", choices=["synthetic", "nyu"])
+    ap.add_argument("--sample", default="data/samples/synthetic_00",
+                     help="Used when --data-source synthetic.")
+    ap.add_argument("--nyu-index", type=int, default=0,
+                     help="Index into the NYU validation split, used when --data-source nyu.")
     ap.add_argument("--corruption", default="low_light")
     ap.add_argument("--severity", type=int, default=4)
+    ap.add_argument("--model-size", default="small", choices=["small", "base", "large"])
+    ap.add_argument("--real-model", action="store_true")
+    ap.add_argument("--zero-dce-weights", default=None)
     ap.add_argument("--out", default="data/results/qualitative_comparison.png")
     args = ap.parse_args()
 
-    rgb = np.asarray(Image.open(f"{args.sample}_rgb.png")).astype(np.float32) / 255.0
-    depth = np.load(f"{args.sample}_depth.npy")
+    rgb, depth = _load_sample(args)
 
     if args.corruption == "indoor_haze":
         corrupted = apply_corruption(args.corruption, rgb, severity=args.severity, depth_m=depth)
     else:
         corrupted = apply_corruption(args.corruption, rgb, severity=args.severity)
-    enhanced = clahe_enhance(corrupted)
 
-    model = MockDepthModel()
-    rows = [("Clean", rgb), (f"{args.corruption} (sev {args.severity})", corrupted), ("+ CLAHE", enhanced)]
+    zero_dce_net = ZeroDCENet()
+    if args.zero_dce_weights:
+        zero_dce_net.load_weights(args.zero_dce_weights)
+    clahe = clahe_enhance(corrupted)
+    zero_dce = zero_dce_enhance(corrupted, zero_dce_net)
+
+    if args.real_model:
+        from depth_infer import DepthAnythingV2Model
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = DepthAnythingV2Model(size=args.model_size, metric=True, device=device)
+        model.load()
+
+        def predict(img):
+            pil_img = Image.fromarray((img * 255).astype(np.uint8))
+            return resolve_depth(model.predict(pil_img), depth)
+    else:
+        model = MockDepthModel()
+
+        def predict(img):
+            return resolve_depth(model.predict(img, depth), depth)
+
+    rows = [
+        ("Clean", rgb),
+        (f"{args.corruption} (sev {args.severity})", corrupted),
+        ("+ CLAHE", clahe),
+        ("+ Zero-DCE", zero_dce),
+    ]
 
     fig, axes = plt.subplots(len(rows), 3, figsize=(10, 3.2 * len(rows)))
     for i, (title, img) in enumerate(rows):
-        pred = resolve_depth(model.predict(img, depth), depth)
+        pred = predict(img)
 
         axes[i, 0].imshow(img)
         axes[i, 0].set_title(f"{title} — RGB")

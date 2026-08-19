@@ -4,6 +4,12 @@ Working pipeline for the plan in `docs/research-plan-review.md`: indoor corrupti
 synthesis → CLAHE/Zero-DCE enhancement → Depth Anything V2 inference → scale-aligned
 metrics (incl. the RealSense near-field band) → latency benchmarking.
 
+**This is the `beta` branch.** It adds real ROS 2 / Sherpa RP hardware
+integration on top of everything below -- see `docs/ROS2_INTEGRATION.md` and
+`ros2_ws/src/depth_estimation_node/`. Not yet run on ROS 2 or the actual robot
+(this dev machine has neither); `main` stays the clean, fully-validated offline
+research pipeline until this is tested on hardware.
+
 ## Status (real GPU workstation, RTX 4060 Laptop, CUDA 12.8) — full pipeline complete
 
 Every stage has now run for real: real NYU Depth V2 data, real Depth Anything V2

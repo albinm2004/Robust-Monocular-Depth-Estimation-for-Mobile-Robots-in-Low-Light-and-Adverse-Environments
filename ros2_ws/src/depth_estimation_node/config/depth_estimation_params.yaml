@@ -1,0 +1,52 @@
+# Parameters for depth_estimation_node.
+#
+# These are this package's own defaults, loaded via its own launch file.
+# They do NOT participate in the Sherpa RP's edubot_config.yaml override
+# chain unless you wire this node into edubot_bringup -- see README.md.
+
+depth_estimation_node:
+  ros__parameters:
+    # Real topic names per the Sherpa RP operating manual.
+    color_topic: "/camera/color/image_raw"
+    depth_topic: "/camera/camera/depth/image_rect_raw"
+    depth_out_topic: "/depth_estimation/depth"
+    obstacle_out_topic: "/depth_estimation/near_field_obstacle"
+
+    # Model: small is the practical choice for the Jetson Orin Nano -- see
+    # data/results/results_summary.md's accuracy-vs-latency table (small:
+    # ~52ms median / 11.7fps mean vs. large: ~344ms / 2.7fps on a dev RTX
+    # 4060; expect the Jetson to be slower again for all three).
+    model_size: "small"      # small | base | large
+    device: "cuda"           # cuda | cpu -- use the JetPack-matched torch build
+
+    # CLAHE is the recommended default: it gave a consistent, modest
+    # improvement across every corruption type in this project's eval sweep.
+    # Zero-DCE (even trained) only helped low_light specifically and hurt
+    # every other condition, including clean frames, because it blindly
+    # brightens every input toward a fixed target exposure -- see
+    # data/results/results_summary.md and qualitative_low_light_sev*.png.
+    # Only switch to zero_dce if you have real evidence your deployment is
+    # low-light-dominated and you've trained real weights for it.
+    enhancement: "clahe"     # none | clahe | zero_dce
+    zero_dce_weights_path: ""  # e.g. "/home/ros/ros2_ws/weights/zero_dce_weights.pth"
+
+    # DA-V2 forward passes are far slower than the RealSense's 30Hz color
+    # stream -- this throttles inference rather than queuing/backing up.
+    inference_hz: 5.0
+
+    # Matches the RealSense D435i's configured obstacle-detection range
+    # from the manual (p.16) -- keep this in sync if edubot_config.yaml's
+    # camera_obstacle_detection.detection_distance changes.
+    near_field_low_m: 0.25
+    near_field_high_m: 0.70
+    obstacle_pixel_threshold: 500
+
+    # Live scale calibration against the RealSense's own stereo depth.
+    # Below this fraction of confidently-valid stereo pixels in a frame
+    # (e.g. under low light, where active-stereo matching degrades), the
+    # node holds its last known scale factor instead of recomputing --
+    # this is the actual fallback behaviour, not just a formality.
+    stereo_valid_fraction_threshold: 0.3
+    scale_ema_alpha: 0.2
+    depth_min_valid_m: 0.1
+    depth_max_valid_m: 10.0
